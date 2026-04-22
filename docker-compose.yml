@@ -1,0 +1,133 @@
+version: "3.9"
+
+networks:
+  vs_net:
+    driver: bridge
+
+volumes:
+  qdrant_data:
+  milvus_etcd:
+  milvus_minio:
+  milvus_data:
+  chroma_data:
+  es_data:
+  opensearch_data:
+  cockroach_data:
+
+services:
+
+  # ── Qdrant  :6333 ──────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── Milvus dependencies ───────────────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: >
+      etcd
+      --advertise-client-urls=http://127.0.0.1:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - milvus_etcd:/etcd
+    networks: [vs_net]
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: milvus-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    volumes:
+      - milvus_minio:/minio_data
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── Milvus standalone  :19530 ─────────────────────────────────────────────
+  milvus:
+    image: milvusdb/milvus:v2.4.4
+    container_name: milvus
+    command: ["milvus", "run", "standalone"]
+    depends_on: [etcd, minio]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── Chroma  :8000 ─────────────────────────────────────────────────────────
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── Elasticsearch  :9200 ──────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── OpenSearch  :9201 ─────────────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.14.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9201:9200"     # host 9201 → container 9200 (avoids ES collision)
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks: [vs_net]
+    restart: unless-stopped
+
+  # ── CockroachDB  :26257 ───────────────────────────────────────────────────
+  cockroachdb:
+    image: cockroachdb/cockroach:latest
+    container_name: cockroachdb
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"   # SQL / pgwire
+      - "8080:8080"     # admin UI
+    volumes:
+      - cockroach_data:/cockroach/cockroach-data
+    networks: [vs_net]
+    restart: unless-stopped
